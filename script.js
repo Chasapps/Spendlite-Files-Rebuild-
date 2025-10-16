@@ -392,28 +392,26 @@ function parseRules(text) {
  */
 function matchesKeyword(descLower, keywordLower) {
   if (!keywordLower) return false;
-  
+
   const text = String(descLower || '').toLowerCase();
-  
-  // Split keyword into individual tokens (words)
   const tokens = String(keywordLower).toLowerCase().split(/\s+/).filter(Boolean);
   if (!tokens.length) return false;
-  
+
   // Define what counts as a word boundary
-  // Letters, digits, &, ., and _ are "word characters"
-  // Everything else is a boundary
   const delim = '[^A-Za-z0-9&._]';
-  
-  // Check that ALL tokens appear in the description with word boundaries
+
+  // If the keyword is exactly 3 words, enforce consecutive in-order phrase match
+  if (tokens.length === 3) {
+    const safe = tokens.map(tok => tok.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    // Allow any non-word delimiter(s) between the three words
+    const re = new RegExp(`(?:^|${delim})${safe[0]}(?:${delim})+${safe[1]}(?:${delim})+${safe[2]}(?:${delim}|$)`, 'i');
+    return re.test(text);
+  }
+
+  // Otherwise, fall back to existing "all tokens present with word boundaries" logic
   return tokens.every(tok => {
-    // Escape special regex characters in the token
     const safe = tok.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    
-    // Create regex: token must appear at word boundary
-    // (?:^|delim) = start of string OR delimiter before
-    // (?:delim|$) = delimiter after OR end of string
     const re = new RegExp(`(?:^|${delim})${safe}(?:${delim}|$)`, 'i');
-    
     return re.test(text);
   });
 }
@@ -898,31 +896,39 @@ function nextWordAfter(marker, desc) {
  */
 function deriveKeywordFromTxn(txn) {
   if (!txn) return "";
-  
   const desc = String(txn.description || txn.desc || "").trim();
   if (!desc) return "";
-  
+
+  // Tokenize into merchant-like words (skip very short noise)
+  const tokens = (desc.match(/[A-Za-z0-9&._]+/g) || []).map(s => s.toLowerCase());
+  if (!tokens.length) return "";
+
+  // Helper to join a window of up to 3 consecutive tokens from index k
+  function join3(k) {
+    const slice = tokens.slice(k, k + 3).filter(Boolean);
+    return slice.map(s => s.toUpperCase()).join(' ');
+  }
+
   const up = desc.toUpperCase();
 
-  // Heuristic 1: PayPal transactions
-  // Format is usually "PAYPAL *MERCHANTNAME"
-  if (/\bPAYPAL\b/.test(up)) {
-    const nxt = nextWordAfter('paypal', desc);
-    return ('PAYPAL' + (nxt ? ' ' + nxt : '')).toUpperCase();
+  // PayPal heuristic: start window at "paypal"
+  const paypalIdx = tokens.indexOf('paypal');
+  if (paypalIdx !== -1) {
+    return join3(paypalIdx);
   }
 
-  // Heuristic 2: VISA- prefix
-  // Some banks show "VISA-MERCHANTNAME"
-  const visaPos = up.indexOf("VISA-");
-  if (visaPos !== -1) {
-    const after = desc.substring(visaPos + 5).trim();
-    const token = (after.split(/\s+/)[0] || "");
-    if (token) return token.toUpperCase();
+  // VISA- heuristic: if original text has "VISA-" then prefer the token AFTER "visa"
+  if (/\bVISA-/.test(up)) {
+    const visaTokIdx = tokens.indexOf('visa');
+    if (visaTokIdx !== -1) {
+      // Start at the next token after 'visa' to skip the prefix
+      const start = Math.min(visaTokIdx + 1, Math.max(0, tokens.length - 1));
+      return join3(start);
+    }
   }
 
-  // Heuristic 3: Generic - first merchant-like token
-  const m = desc.match(/([A-Za-z0-9&._]{3,})/);
-  return m ? m[1].toUpperCase() : "";
+  // Generic: first 3 merchant-like tokens
+  return join3(0);
 }
 
 /**
@@ -1071,25 +1077,7 @@ function assignCategory(idx) {
 function assignCategory_OLD(idx) {
   const txn = CURRENT_TXNS[idx];
   if (!txn) return;
-  
-  const desc = txn.description || "";
-  const up = desc.toUpperCase();
-
-  // Build suggested keyword using same heuristics
-  let suggestedKeyword = "";
-  
-  if (/\bPAYPAL\b/.test(up)) {
-    const nxt = nextWordAfter('paypal', desc);
-    suggestedKeyword = ('PAYPAL' + (nxt ? ' ' + nxt : '')).toUpperCase();
-  } else {
-    const visaPos = up.indexOf("VISA-");
-    if (visaPos !== -1) {
-      const after = desc.substring(visaPos + 5).trim();
-      suggestedKeyword = (after.split(/\s+/)[0] || "").toUpperCase();
-    } else {
-      suggestedKeyword = (desc.split(/\s+/)[0] || "").toUpperCase();
-    }
-  }
+  const suggestedKeyword = deriveKeywordFromTxn(txn);
 
   // Ask user for keyword
   const keywordInput = prompt("Enter keyword to match:", suggestedKeyword);
